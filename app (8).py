@@ -22,7 +22,20 @@ st.title("IFC geometrisk kontroll — MVP")
 st.caption("Checker: vägg når UK/ÖK bjälklag")
 
 uploaded = st.file_uploader("Ladda upp IFC-fil", type=["ifc"])
-tol_mm = st.number_input("Tolerans (mm)", min_value=1.0, max_value=100.0, value=10.0, step=1.0)
+
+col_tol, col_ov = st.columns(2)
+tol_mm = col_tol.number_input(
+    "Tolerans Z (mm)", min_value=1.0, max_value=100.0, value=10.0, step=1.0,
+    help="Hur stort Z-gap som tillåts innan det flaggas.",
+)
+min_overlap = col_ov.number_input(
+    "Min XY-överlapp (m²)", min_value=0.001, max_value=1.0, value=0.01, step=0.01,
+    format="%.3f",
+    help=(
+        "Minsta yta där vägg-footprint och slab-footprint överlappar i planet "
+        "för att de ska matchas. 0.01 m² = ~100 cm² filtrerar bort kant-träffar."
+    ),
+)
 
 if uploaded is None:
     st.info("Ladda upp en IFC för att starta.")
@@ -54,7 +67,11 @@ st.write(
     f"och **{len(slab_bboxes)} bjälklag**."
 )
 
-violations = check_walls_reach_slabs(wall_bboxes, slab_bboxes, tolerance_mm=tol_mm)
+violations = check_walls_reach_slabs(
+    wall_bboxes, slab_bboxes,
+    tolerance_mm=tol_mm,
+    min_xy_overlap_m2=min_overlap,
+)
 
 st.subheader("Resultat")
 if not violations:
