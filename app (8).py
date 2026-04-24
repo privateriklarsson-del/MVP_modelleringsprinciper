@@ -1,7 +1,7 @@
 """
 Streamlit UI for geometric IFC checks.
 
-Keep it thin: UI only. All logic lives in geometry.py and rules.py.
+Keep it thin: UI only. All logic lives in geometry.py, rules.py, bcf_export.py.
 """
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import ifcopenshell
 import pandas as pd
 import streamlit as st
 
+from bcf_export import default_bcf_filename, violations_to_bcf
 from geometry import bboxes_for_class
 from rules import check_walls_reach_slabs, filter_interior_walls
 
@@ -27,7 +28,6 @@ if uploaded is None:
     st.info("Ladda upp en IFC för att starta.")
     st.stop()
 
-# Persist upload to a temp path so ifcopenshell can open it by path.
 with tempfile.NamedTemporaryFile(delete=False, suffix=".ifc") as tmp:
     tmp.write(uploaded.read())
     tmp_path = Path(tmp.name)
@@ -61,8 +61,30 @@ if not violations:
     st.success("Inga avvikelser funna.")
 else:
     st.error(f"{len(violations)} avvikelser hittades.")
-    df = pd.DataFrame([v.__dict__ for v in violations])
+
+    # Build a display-friendly DataFrame (hide the list/tuple fields)
+    rows = [
+        {
+            "global_id": v.global_id,
+            "element_name": v.element_name,
+            "rule": v.rule,
+            "measured_gap_mm": round(v.measured_gap_mm, 1),
+            "description": v.description,
+        }
+        for v in violations
+    ]
+    df = pd.DataFrame(rows)
     st.dataframe(df, use_container_width=True)
 
     with st.expander("Fördelning per regel"):
         st.bar_chart(df["rule"].value_counts())
+
+    with st.spinner("Genererar BCF..."):
+        bcf_bytes = violations_to_bcf(violations)
+
+    st.download_button(
+        label="Ladda ner BCF",
+        data=bcf_bytes,
+        file_name=default_bcf_filename(),
+        mime="application/octet-stream",
+    )
