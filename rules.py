@@ -59,20 +59,43 @@ def _wall_center_xy(wall: ElementBBox) -> tuple[float, float]:
     return ((wall.x_min + wall.x_max) / 2.0, (wall.y_min + wall.y_max) / 2.0)
 
 
+def _xy_overlap_area(a: ElementBBox, b: ElementBBox) -> float:
+    """Area of AABB overlap in the XY plane. Returns 0 if no overlap."""
+    dx = min(a.x_max, b.x_max) - max(a.x_min, b.x_min)
+    dy = min(a.y_max, b.y_max) - max(a.y_min, b.y_min)
+    if dx <= 0 or dy <= 0:
+        return 0.0
+    return dx * dy
+
+
 def check_walls_reach_slabs(
     wall_bboxes: list[ElementBBox],
     slab_bboxes: list[ElementBBox],
     tolerance_mm: float = 10.0,
+    min_xy_overlap_m2: float = 0.01,
     unit_factor_to_mm: float = 1000.0,
 ) -> list[Violation]:
+    """Check walls reach slabs above and below.
+
+    Matching logic:
+      1. Candidate slabs must overlap the wall's XY footprint above
+         min_xy_overlap_m2 (prevents matching walls to slabs far away).
+      2. From candidates, pick the nearest in Z.
+    """
     violations: list[Violation] = []
     tol = tolerance_mm / unit_factor_to_mm
 
     for wall in wall_bboxes:
         cx, cy = _wall_center_xy(wall)
 
-        slabs_above = [s for s in slab_bboxes if s.z_min >= wall.z_max - tol]
-        slabs_below = [s for s in slab_bboxes if s.z_max <= wall.z_min + tol]
+        # XY-overlap filter: only slabs that actually sit over/under the wall
+        xy_candidates = [
+            s for s in slab_bboxes
+            if _xy_overlap_area(wall, s) >= min_xy_overlap_m2
+        ]
+
+        slabs_above = [s for s in xy_candidates if s.z_min >= wall.z_max - tol]
+        slabs_below = [s for s in xy_candidates if s.z_max <= wall.z_min + tol]
 
         if slabs_above:
             slab_above = min(slabs_above, key=lambda s: s.z_min - wall.z_max)
