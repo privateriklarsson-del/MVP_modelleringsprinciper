@@ -24,22 +24,21 @@ from rules import check_walls_reach_slabs, filter_interior_walls
 
 
 WALL_PREFIXES = ["IWS", "IWC", "IV"]
-SLAB_PREFIXES = ["FS"]
+DEFAULT_MIN_SLAB_AREA_M2 = 3.0
 
 
 @st.cache_data(show_spinner=False)
 def load_and_extract(
     ifc_bytes: bytes,
     wall_prefixes: tuple[str, ...],
-    slab_prefixes: tuple[str, ...],
+    min_slab_area_m2: float,
 ) -> tuple[str, dict, list[ElementBBox], list[ElementBBox]]:
-    """Open IFC, filter by JM.TypeID prefix, extract bboxes.
+    """Open IFC, filter elements, extract bboxes.
 
-    Cached on (file content, prefix lists). Returns:
-      - schema
-      - counts dict: {wall_total, wall_in_scope, slab_total, slab_in_scope}
-      - wall_bboxes (filtered to interior + matching wall_prefixes)
-      - slab_bboxes (filtered to matching slab_prefixes)
+    Walls: interior + JM.TypeID prefix match.
+    Slabs: footprint area >= min_slab_area_m2 (no typeid filter).
+
+    Cached on (file content, wall_prefixes, min_slab_area_m2).
     """
     import ifcopenshell.geom
 
@@ -49,17 +48,15 @@ def load_and_extract(
     try:
         ifc = ifcopenshell.open(str(tmp_path))
 
-        # Walls: interior filter THEN typeid prefix filter
+        # Walls: interior filter THEN typeid prefix filter (cheap before bbox)
         all_walls = ifc.by_type("IfcWall")
         interior_wall_ids = {w.GlobalId for w in filter_interior_walls(ifc)}
         interior_walls = [w for w in all_walls if w.GlobalId in interior_wall_ids]
         scope_walls = filter_by_typeid_prefix(interior_walls, list(wall_prefixes))
 
-        # Slabs: typeid prefix filter only
+        # Slabs: must extract bbox first, then filter on area
         all_slabs = ifc.by_type("IfcSlab")
-        scope_slabs = filter_by_typeid_prefix(all_slabs, list(slab_prefixes))
 
-        # Bbox extraction only for in-scope elements
         settings = ifcopenshell.geom.settings()
         settings.set(settings.USE_WORLD_COORDS, True)
 
@@ -70,10 +67,16 @@ def load_and_extract(
                 wall_bboxes.append(bb)
 
         slab_bboxes = []
-        for s in scope_slabs:
+        slab_dropped_small = 0
+        for s in all_slabs:
             bb = bbox_of_element(s, settings)
-            if bb is not None:
-                slab_bboxes.append(bb)
+            if bb is None:
+                continue
+            area = (bb.x_max - bb.x_min) * (bb.y_max - bb.y_min)
+            if area < min_slab_area_m2:
+                slab_dropped_small += 1
+                continue
+            slab_bboxes.append(bb)
 
         counts = {
             "wall_total": len(all_walls),
@@ -81,6 +84,7 @@ def load_and_extract(
             "wall_in_scope": len(wall_bboxes),
             "slab_total": len(all_slabs),
             "slab_in_scope": len(slab_bboxes),
+            "slab_dropped_small": slab_dropped_small,
         }
         return ifc.schema, counts, wall_bboxes, slab_bboxes
     finally:
@@ -93,7 +97,7 @@ st.caption("Checker: vägg når UK/ÖK bjälklag")
 
 uploaded = st.file_uploader("Ladda upp IFC-fil", type=["ifc"])
 
-col_tol, col_ov = st.columns(2)
+col_tol, col_ov, col_area = st.columns(3)
 tol_mm = col_tol.number_input(
     "Tolerans Z (mm)", min_value=1.0, max_value=100.0, value=10.0, step=1.0,
     help="Hur stort Z-gap som tillåts innan det flaggas.",
@@ -106,6 +110,11 @@ min_overlap = col_ov.number_input(
         "för att de ska matchas. 0.01 m² = ~100 cm² filtrerar bort kant-träffar."
     ),
 )
+min_slab_area = col_area.number_input(
+    "Min slab-area (m²)", min_value=0.5, max_value=50.0,
+    value=DEFAULT_MIN_SLAB_AREA_M2, step=0.5,
+    help="Slabs mindre än så här (footprint AABB) skippas — t.ex. trösklar och små stödplattor.",
+)
 
 if uploaded is None:
     st.info("Ladda upp en IFC för att starta.")
@@ -117,7 +126,7 @@ file_hash = hashlib.md5(ifc_bytes).hexdigest()[:8]
 
 with st.spinner("Läser IFC och extraherar geometri (cachas per fil)..."):
     schema, counts, wall_bboxes, slab_bboxes = load_and_extract(
-        ifc_bytes, tuple(WALL_PREFIXES), tuple(SLAB_PREFIXES),
+        ifc_bytes, tuple(WALL_PREFIXES), float(min_slab_area),
     )
 
 col_a, col_b, col_c, col_d = st.columns(4)
@@ -134,15 +143,16 @@ col_c.metric(
     "Slabs i scope",
     counts["slab_in_scope"],
     help=(
-        f"Filtrerade prefix: {', '.join(SLAB_PREFIXES)}. "
-        f"Totalt {counts['slab_total']} IfcSlab."
+        f"Filter: footprint-area ≥ {min_slab_area:.1f} m². "
+        f"Totalt {counts['slab_total']} IfcSlab, "
+        f"{counts['slab_dropped_small']} skippade som för små."
     ),
 )
 col_d.metric("Fil-hash", file_hash)
 
 st.caption(
-    f"Endast element med JM.TypeID matchande {WALL_PREFIXES} (väggar) "
-    f"och {SLAB_PREFIXES} (slabs) ingår. Övriga skippas."
+    f"Väggar: JM.TypeID matchande {WALL_PREFIXES}. "
+    f"Slabs: footprint ≥ {min_slab_area:.1f} m². Övriga skippas."
 )
 
 violations = check_walls_reach_slabs(
