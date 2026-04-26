@@ -92,7 +92,7 @@ def load_and_extract(
 
 st.set_page_config(page_title="IFC Geom Checker", layout="wide")
 st.title("IFC geometrisk kontroll — MVP")
-st.caption("Checker: vägg når UK/ÖK bjälklag")
+st.caption("Checker: vägg når UK/ÖK bjälklag - Arkitekt. filtrear fram innerväggar och ser om de följer modelleringsprinciper")
 
 uploaded = st.file_uploader("Ladda upp IFC-fil", type=["ifc"])
 
