@@ -2,9 +2,14 @@
 Streamlit UI for geometric IFC checks.
 
 Keep it thin: UI only. All logic lives in geometry.py, rules.py, bcf_export.py.
+
+Performance: IFC load + geometry extraction is cached on file contents,
+so tuning parameters re-run only the cheap rule evaluation, not the
+30–60s geometry step.
 """
 from __future__ import annotations
 
+import hashlib
 import tempfile
 from pathlib import Path
 
@@ -13,8 +18,30 @@ import pandas as pd
 import streamlit as st
 
 from bcf_export import default_bcf_filename, violations_to_bcf
-from geometry import bboxes_for_class
+from geometry import ElementBBox, bboxes_for_class
 from rules import check_walls_reach_slabs, filter_interior_walls
+
+
+@st.cache_data(show_spinner=False)
+def load_and_extract(ifc_bytes: bytes) -> tuple[str, int, list[ElementBBox], list[ElementBBox]]:
+    """Open IFC and extract bboxes. Cached on bytes content.
+
+    Returns: (schema, total_wall_count, interior_wall_bboxes, slab_bboxes)
+    """
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".ifc") as tmp:
+        tmp.write(ifc_bytes)
+        tmp_path = Path(tmp.name)
+    try:
+        ifc = ifcopenshell.open(str(tmp_path))
+        total_walls = len(ifc.by_type("IfcWall"))
+
+        interior_wall_ids = {w.GlobalId for w in filter_interior_walls(ifc)}
+        all_wall_bboxes = bboxes_for_class(ifc, "IfcWall")
+        wall_bboxes = [b for b in all_wall_bboxes if b.global_id in interior_wall_ids]
+        slab_bboxes = bboxes_for_class(ifc, "IfcSlab")
+        return ifc.schema, total_walls, wall_bboxes, slab_bboxes
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 st.set_page_config(page_title="IFC Geom Checker", layout="wide")
@@ -41,31 +68,20 @@ if uploaded is None:
     st.info("Ladda upp en IFC för att starta.")
     st.stop()
 
-with tempfile.NamedTemporaryFile(delete=False, suffix=".ifc") as tmp:
-    tmp.write(uploaded.read())
-    tmp_path = Path(tmp.name)
+# getvalue() works regardless of read-pointer state (important for rerun)
+ifc_bytes = uploaded.getvalue()
+file_hash = hashlib.md5(ifc_bytes).hexdigest()[:8]
 
-with st.spinner("Läser IFC..."):
-    ifc = ifcopenshell.open(str(tmp_path))
+with st.spinner("Läser IFC och extraherar geometri (cachas per fil)..."):
+    schema, total_walls, wall_bboxes, slab_bboxes = load_and_extract(ifc_bytes)
 
-col_a, col_b, col_c = st.columns(3)
-col_a.metric("IFC-schema", ifc.schema)
-col_b.metric("IfcWall (totalt)", len(ifc.by_type("IfcWall")))
-col_c.metric("IfcSlab (totalt)", len(ifc.by_type("IfcSlab")))
+col_a, col_b, col_c, col_d = st.columns(4)
+col_a.metric("IFC-schema", schema)
+col_b.metric("IfcWall (totalt)", total_walls)
+col_c.metric("Innerväggar", len(wall_bboxes))
+col_d.metric("IfcSlab", len(slab_bboxes))
 
-with st.spinner("Beräknar geometri (kan ta en stund)..."):
-    interior_walls = filter_interior_walls(ifc)
-    interior_wall_ids = {w.GlobalId for w in interior_walls}
-
-    all_wall_bboxes = bboxes_for_class(ifc, "IfcWall")
-    wall_bboxes = [b for b in all_wall_bboxes if b.global_id in interior_wall_ids]
-    slab_bboxes = bboxes_for_class(ifc, "IfcSlab")
-
-st.write(
-    f"Bearbetade **{len(wall_bboxes)} innerväggar** "
-    f"(av {len(all_wall_bboxes)} IfcWall totalt) "
-    f"och **{len(slab_bboxes)} bjälklag**."
-)
+st.caption(f"Fil-hash: `{file_hash}` — tuning-parametrar kör bara om regeln, inte geometri-extraktionen.")
 
 violations = check_walls_reach_slabs(
     wall_bboxes, slab_bboxes,
@@ -79,7 +95,6 @@ if not violations:
 else:
     st.error(f"{len(violations)} avvikelser hittades.")
 
-    # Build a display-friendly DataFrame (hide the list/tuple fields)
     rows = [
         {
             "global_id": v.global_id,
