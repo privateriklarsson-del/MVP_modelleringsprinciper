@@ -96,10 +96,17 @@ st.caption("Checker: vägg når UK/ÖK bjälklag")
 
 uploaded = st.file_uploader("Ladda upp IFC-fil", type=["ifc"])
 
-col_tol, col_area = st.columns(2)
+col_tol, col_maxgap, col_area = st.columns(3)
 tol_mm = col_tol.number_input(
     "Tolerans Z (mm)", min_value=1.0, max_value=100.0, value=10.0, step=1.0,
-    help="Hur stort Z-gap som tillåts innan det flaggas.",
+    help="Hur stort Z-gap som tillåts innan det flaggas som avvikelse.",
+)
+max_z_gap_mm = col_maxgap.number_input(
+    "Max sökavstånd Z (mm)", min_value=50.0, max_value=2000.0, value=500.0, step=50.0,
+    help=(
+        "Slabs längre bort i Z än så här ignoreras helt. "
+        "Förhindrar matchning mot slab på fel våning."
+    ),
 )
 min_slab_area = col_area.number_input(
     "Min slab-area (m²)", min_value=0.5, max_value=50.0,
@@ -149,6 +156,7 @@ st.caption(
 violations = check_walls_reach_slabs(
     wall_bboxes, slab_footprints,
     tolerance_mm=tol_mm,
+    max_z_gap_mm=max_z_gap_mm,
 )
 
 st.subheader("Resultat")
