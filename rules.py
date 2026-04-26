@@ -77,16 +77,21 @@ def check_walls_reach_slabs(
     wall_bboxes: list[ElementBBox],
     slab_footprints: list[SlabFootprint],
     tolerance_mm: float = 10.0,
+    max_z_gap_mm: float = 500.0,
     unit_factor_to_mm: float = 1000.0,
 ) -> list[Violation]:
     """Check walls reach slabs above and below.
 
-    Matching: a slab is a candidate iff the wall's XY centre lies inside
-    the slab's true 2D footprint polygon. From valid candidates, pick the
-    nearest in Z above and below.
+    Matching:
+      1. Wall's XY centre must lie inside the slab's true 2D footprint polygon.
+      2. Slab must be within max_z_gap_mm of the wall's top (above) or bottom
+         (below). Prevents matching against slabs on the wrong floor when the
+         correct floor's slab is missing or has a hole at the wall's position.
+    From valid candidates, pick the nearest in Z above and below.
     """
     violations: list[Violation] = []
     tol = tolerance_mm / unit_factor_to_mm
+    max_gap = max_z_gap_mm / unit_factor_to_mm
 
     for wall in wall_bboxes:
         cx, cy = _wall_center_xy(wall)
@@ -98,8 +103,17 @@ def check_walls_reach_slabs(
             if _wall_center_in_slab_polygon(wall, sf)
         ]
 
-        slabs_above = [sf for sf in candidates if sf.bbox.z_min >= wall.z_max - tol]
-        slabs_below = [sf for sf in candidates if sf.bbox.z_max <= wall.z_min + tol]
+        # Hard Z-gap limit: only consider slabs reasonably close in height.
+        # If the correct slab is missing or has a hole, we report nothing
+        # rather than matching against a wrong-floor slab.
+        slabs_above = [
+            sf for sf in candidates
+            if -tol <= sf.bbox.z_min - wall.z_max <= max_gap
+        ]
+        slabs_below = [
+            sf for sf in candidates
+            if -tol <= wall.z_min - sf.bbox.z_max <= max_gap
+        ]
 
         if slabs_above:
             slab_above = min(slabs_above, key=lambda sf: sf.bbox.z_min - wall.z_max)
