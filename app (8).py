@@ -19,11 +19,11 @@ import streamlit as st
 
 from bcf_export import default_bcf_filename, violations_to_bcf
 from classification import filter_by_typeid_prefix
-from geometry import ElementBBox, bbox_of_element
+from geometry import ElementBBox, SlabFootprint, bbox_of_element, slab_footprint_of_element
 from rules import check_walls_reach_slabs, filter_interior_walls
 
 
-WALL_PREFIXES = ["IWS", "IV"]
+WALL_PREFIXES = ["IWS", "IWC", "IV"]
 DEFAULT_MIN_SLAB_AREA_M2 = 3.0
 
 
@@ -32,11 +32,11 @@ def load_and_extract(
     ifc_bytes: bytes,
     wall_prefixes: tuple[str, ...],
     min_slab_area_m2: float,
-) -> tuple[str, dict, list[ElementBBox], list[ElementBBox]]:
-    """Open IFC, filter elements, extract bboxes.
+) -> tuple[str, dict, list[ElementBBox], list[SlabFootprint]]:
+    """Open IFC, filter elements, extract bboxes + slab footprints.
 
     Walls: interior + JM.TypeID prefix match.
-    Slabs: footprint area >= min_slab_area_m2 (no typeid filter).
+    Slabs: footprint area (true polygon) >= min_slab_area_m2.
 
     Cached on (file content, wall_prefixes, min_slab_area_m2).
     """
@@ -54,7 +54,6 @@ def load_and_extract(
         interior_walls = [w for w in all_walls if w.GlobalId in interior_wall_ids]
         scope_walls = filter_by_typeid_prefix(interior_walls, list(wall_prefixes))
 
-        # Slabs: must extract bbox first, then filter on area
         all_slabs = ifc.by_type("IfcSlab")
 
         settings = ifcopenshell.geom.settings()
@@ -66,27 +65,27 @@ def load_and_extract(
             if bb is not None:
                 wall_bboxes.append(bb)
 
-        slab_bboxes = []
+        slab_footprints = []
         slab_dropped_small = 0
         for s in all_slabs:
-            bb = bbox_of_element(s, settings)
-            if bb is None:
+            sf = slab_footprint_of_element(s, settings)
+            if sf is None:
                 continue
-            area = (bb.x_max - bb.x_min) * (bb.y_max - bb.y_min)
-            if area < min_slab_area_m2:
+            # Filter on TRUE polygon area, not AABB area
+            if sf.footprint.area < min_slab_area_m2:
                 slab_dropped_small += 1
                 continue
-            slab_bboxes.append(bb)
+            slab_footprints.append(sf)
 
         counts = {
             "wall_total": len(all_walls),
             "wall_interior": len(interior_walls),
             "wall_in_scope": len(wall_bboxes),
             "slab_total": len(all_slabs),
-            "slab_in_scope": len(slab_bboxes),
+            "slab_in_scope": len(slab_footprints),
             "slab_dropped_small": slab_dropped_small,
         }
-        return ifc.schema, counts, wall_bboxes, slab_bboxes
+        return ifc.schema, counts, wall_bboxes, slab_footprints
     finally:
         tmp_path.unlink(missing_ok=True)
 
@@ -97,23 +96,15 @@ st.caption("Checker: vägg når UK/ÖK bjälklag")
 
 uploaded = st.file_uploader("Ladda upp IFC-fil", type=["ifc"])
 
-col_tol, col_ov, col_area = st.columns(3)
+col_tol, col_area = st.columns(2)
 tol_mm = col_tol.number_input(
     "Tolerans Z (mm)", min_value=1.0, max_value=100.0, value=10.0, step=1.0,
     help="Hur stort Z-gap som tillåts innan det flaggas.",
 )
-min_overlap = col_ov.number_input(
-    "Min XY-överlapp (m²)", min_value=0.001, max_value=1.0, value=0.01, step=0.01,
-    format="%.3f",
-    help=(
-        "Minsta yta där vägg-footprint och slab-footprint överlappar i planet "
-        "för att de ska matchas. 0.01 m² = ~100 cm² filtrerar bort kant-träffar."
-    ),
-)
 min_slab_area = col_area.number_input(
     "Min slab-area (m²)", min_value=0.5, max_value=50.0,
     value=DEFAULT_MIN_SLAB_AREA_M2, step=0.5,
-    help="Slabs mindre än så här (footprint AABB) skippas — t.ex. trösklar och små stödplattor.",
+    help="Slabs mindre än så här (verklig footprint-area) skippas.",
 )
 
 if uploaded is None:
@@ -125,7 +116,7 @@ ifc_bytes = uploaded.getvalue()
 file_hash = hashlib.md5(ifc_bytes).hexdigest()[:8]
 
 with st.spinner("Läser IFC och extraherar geometri (cachas per fil)..."):
-    schema, counts, wall_bboxes, slab_bboxes = load_and_extract(
+    schema, counts, wall_bboxes, slab_footprints = load_and_extract(
         ifc_bytes, tuple(WALL_PREFIXES), float(min_slab_area),
     )
 
@@ -156,9 +147,8 @@ st.caption(
 )
 
 violations = check_walls_reach_slabs(
-    wall_bboxes, slab_bboxes,
+    wall_bboxes, slab_footprints,
     tolerance_mm=tol_mm,
-    min_xy_overlap_m2=min_overlap,
 )
 
 st.subheader("Resultat")
