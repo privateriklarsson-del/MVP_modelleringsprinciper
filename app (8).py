@@ -23,7 +23,7 @@ from geometry import ElementBBox, SlabFootprint, bbox_of_element, slab_footprint
 from rules import check_walls_reach_slabs, filter_interior_walls
 
 
-WALL_PREFIXES = ["IWS", "IWC", "IV"]
+WALL_PREFIXES = ["IWS", "IV"]
 DEFAULT_MIN_SLAB_AREA_M2 = 3.0
 
 
