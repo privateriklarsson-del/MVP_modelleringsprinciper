@@ -2,7 +2,7 @@
 Rules for geometric model checking.
 
 Principle: each rule is a pure function.
-  - Input: bboxes (+ any element metadata needed)
+  - Input: bboxes (+ slab footprints + any element metadata needed)
   - Output: list of Violation objects
 
 A Violation carries enough info to generate a BCF topic:
@@ -13,9 +13,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import numpy as np
+from shapely import Point
 
-from geometry import ElementBBox
+from geometry import ElementBBox, SlabFootprint
 
 
 @dataclass
@@ -59,40 +59,31 @@ def _wall_center_xy(wall: ElementBBox) -> tuple[float, float]:
     return ((wall.x_min + wall.x_max) / 2.0, (wall.y_min + wall.y_max) / 2.0)
 
 
-def _xy_overlap_area(a: ElementBBox, b: ElementBBox) -> float:
-    """Area of AABB overlap in the XY plane. Returns 0 if no overlap."""
-    dx = min(a.x_max, b.x_max) - max(a.x_min, b.x_min)
-    dy = min(a.y_max, b.y_max) - max(a.y_min, b.y_min)
-    if dx <= 0 or dy <= 0:
-        return 0.0
-    return dx * dy
+def _wall_center_in_slab_polygon(wall: ElementBBox, slab: SlabFootprint) -> bool:
+    """True if wall's XY centre lies inside slab's true 2D footprint polygon.
 
-
-def _wall_center_in_slab_footprint(wall: ElementBBox, slab: ElementBBox) -> bool:
-    """True if the wall's XY centre lies inside the slab's XY AABB.
-
-    Sanity check that catches false matches from:
-      - diagonal/non-axis-aligned walls (AABB much larger than real footprint)
-      - tiny corner overlaps where wall just touches slab edge
+    Replaces the old AABB-based check. A long balcony slab whose AABB extends
+    far in one direction will no longer falsely match walls under empty
+    parts of the AABB — only walls with centre inside the actual slab
+    geometry pass.
     """
     cx, cy = _wall_center_xy(wall)
-    return (slab.x_min <= cx <= slab.x_max
-            and slab.y_min <= cy <= slab.y_max)
+    # covers() includes boundary; contains() excludes it. covers() is safer
+    # for walls that align with slab edges.
+    return slab.footprint.covers(Point(cx, cy))
 
 
 def check_walls_reach_slabs(
     wall_bboxes: list[ElementBBox],
-    slab_bboxes: list[ElementBBox],
+    slab_footprints: list[SlabFootprint],
     tolerance_mm: float = 10.0,
-    min_xy_overlap_m2: float = 0.01,
     unit_factor_to_mm: float = 1000.0,
 ) -> list[Violation]:
     """Check walls reach slabs above and below.
 
-    Matching logic (a slab is a candidate only if BOTH hold):
-      1. AABB overlap with wall in XY plane >= min_xy_overlap_m2.
-      2. Wall's XY centre lies inside slab's XY AABB.
-    From valid candidates, pick the nearest in Z.
+    Matching: a slab is a candidate iff the wall's XY centre lies inside
+    the slab's true 2D footprint polygon. From valid candidates, pick the
+    nearest in Z above and below.
     """
     violations: list[Violation] = []
     tol = tolerance_mm / unit_factor_to_mm
@@ -100,21 +91,19 @@ def check_walls_reach_slabs(
     for wall in wall_bboxes:
         cx, cy = _wall_center_xy(wall)
 
-        # XY-overlap filter PLUS centre-in-footprint sanity check.
-        # Both conditions must hold: catches diagonal walls and tiny
-        # corner overlaps that AABB-overlap alone would let through.
-        xy_candidates = [
-            s for s in slab_bboxes
-            if _xy_overlap_area(wall, s) >= min_xy_overlap_m2
-            and _wall_center_in_slab_footprint(wall, s)
+        # Real-geometry sanity check: wall centre must lie inside the slab's
+        # true footprint, not just its AABB.
+        candidates = [
+            sf for sf in slab_footprints
+            if _wall_center_in_slab_polygon(wall, sf)
         ]
 
-        slabs_above = [s for s in xy_candidates if s.z_min >= wall.z_max - tol]
-        slabs_below = [s for s in xy_candidates if s.z_max <= wall.z_min + tol]
+        slabs_above = [sf for sf in candidates if sf.bbox.z_min >= wall.z_max - tol]
+        slabs_below = [sf for sf in candidates if sf.bbox.z_max <= wall.z_min + tol]
 
         if slabs_above:
-            slab_above = min(slabs_above, key=lambda s: s.z_min - wall.z_max)
-            gap = slab_above.z_min - wall.z_max
+            slab_above = min(slabs_above, key=lambda sf: sf.bbox.z_min - wall.z_max)
+            gap = slab_above.bbox.z_min - wall.z_max
             if abs(gap) > tol:
                 violations.append(Violation(
                     global_id=wall.global_id,
@@ -122,16 +111,16 @@ def check_walls_reach_slabs(
                     rule="wall_top_reaches_slab_above",
                     description=(
                         f"Vägg når inte UK bjälklag. Gap: {gap * unit_factor_to_mm:.1f} mm. "
-                        f"Matchad platta: {slab_above.global_id}."
+                        f"Matchad platta: {slab_above.bbox.global_id}."
                     ),
                     measured_gap_mm=gap * unit_factor_to_mm,
-                    related_global_ids=[slab_above.global_id],
-                    camera_target=(cx, cy, (wall.z_max + slab_above.z_min) / 2.0),
+                    related_global_ids=[slab_above.bbox.global_id],
+                    camera_target=(cx, cy, (wall.z_max + slab_above.bbox.z_min) / 2.0),
                 ))
 
         if slabs_below:
-            slab_below = max(slabs_below, key=lambda s: s.z_max - wall.z_min)
-            gap = wall.z_min - slab_below.z_max
+            slab_below = max(slabs_below, key=lambda sf: sf.bbox.z_max - wall.z_min)
+            gap = wall.z_min - slab_below.bbox.z_max
             if abs(gap) > tol:
                 violations.append(Violation(
                     global_id=wall.global_id,
@@ -139,11 +128,11 @@ def check_walls_reach_slabs(
                     rule="wall_bottom_reaches_slab_below",
                     description=(
                         f"Vägg når inte ÖK bjälklag. Gap: {gap * unit_factor_to_mm:.1f} mm. "
-                        f"Matchad platta: {slab_below.global_id}."
+                        f"Matchad platta: {slab_below.bbox.global_id}."
                     ),
                     measured_gap_mm=gap * unit_factor_to_mm,
-                    related_global_ids=[slab_below.global_id],
-                    camera_target=(cx, cy, (wall.z_min + slab_below.z_max) / 2.0),
+                    related_global_ids=[slab_below.bbox.global_id],
+                    camera_target=(cx, cy, (wall.z_min + slab_below.bbox.z_max) / 2.0),
                 ))
 
     return violations
