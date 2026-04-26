@@ -68,6 +68,18 @@ def _xy_overlap_area(a: ElementBBox, b: ElementBBox) -> float:
     return dx * dy
 
 
+def _wall_center_in_slab_footprint(wall: ElementBBox, slab: ElementBBox) -> bool:
+    """True if the wall's XY centre lies inside the slab's XY AABB.
+
+    Sanity check that catches false matches from:
+      - diagonal/non-axis-aligned walls (AABB much larger than real footprint)
+      - tiny corner overlaps where wall just touches slab edge
+    """
+    cx, cy = _wall_center_xy(wall)
+    return (slab.x_min <= cx <= slab.x_max
+            and slab.y_min <= cy <= slab.y_max)
+
+
 def check_walls_reach_slabs(
     wall_bboxes: list[ElementBBox],
     slab_bboxes: list[ElementBBox],
@@ -77,10 +89,10 @@ def check_walls_reach_slabs(
 ) -> list[Violation]:
     """Check walls reach slabs above and below.
 
-    Matching logic:
-      1. Candidate slabs must overlap the wall's XY footprint above
-         min_xy_overlap_m2 (prevents matching walls to slabs far away).
-      2. From candidates, pick the nearest in Z.
+    Matching logic (a slab is a candidate only if BOTH hold):
+      1. AABB overlap with wall in XY plane >= min_xy_overlap_m2.
+      2. Wall's XY centre lies inside slab's XY AABB.
+    From valid candidates, pick the nearest in Z.
     """
     violations: list[Violation] = []
     tol = tolerance_mm / unit_factor_to_mm
@@ -88,10 +100,13 @@ def check_walls_reach_slabs(
     for wall in wall_bboxes:
         cx, cy = _wall_center_xy(wall)
 
-        # XY-overlap filter: only slabs that actually sit over/under the wall
+        # XY-overlap filter PLUS centre-in-footprint sanity check.
+        # Both conditions must hold: catches diagonal walls and tiny
+        # corner overlaps that AABB-overlap alone would let through.
         xy_candidates = [
             s for s in slab_bboxes
             if _xy_overlap_area(wall, s) >= min_xy_overlap_m2
+            and _wall_center_in_slab_footprint(wall, s)
         ]
 
         slabs_above = [s for s in xy_candidates if s.z_min >= wall.z_max - tol]
