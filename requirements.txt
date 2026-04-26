@@ -1,5 +1,6 @@
 ifcopenshell==0.8.5
 bcf-client==0.8.5
+shapely>=2.0,<3.0
 streamlit>=1.37,<2.0
 pandas>=2.0
 numpy>=1.26,<3.0
