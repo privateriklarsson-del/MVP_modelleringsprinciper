@@ -150,3 +150,60 @@ def check_walls_reach_slabs(
                 ))
 
     return violations
+
+
+def check_walls_clash_slabs(
+    wall_bboxes: list[ElementBBox],
+    slab_footprints: list[SlabFootprint],
+    tolerance_mm: float = 20.0,
+    unit_factor_to_mm: float = 1000.0,
+) -> list[Violation]:
+    """Check walls don't physically overlap (clash) with slabs in 3D.
+
+    Matching:
+      1. Wall's XY centre must lie inside the slab's true 2D footprint.
+      2. Z-overlap between wall and slab must exceed tolerance_mm.
+
+    A small intrusion (a few mm) is normal modelling imprecision. Larger
+    overlap means the wall extends through the slab and is wrong.
+    """
+    violations: list[Violation] = []
+    tol = tolerance_mm / unit_factor_to_mm
+
+    for wall in wall_bboxes:
+        cx, cy = _wall_center_xy(wall)
+
+        candidates = [
+            sf for sf in slab_footprints
+            if _wall_center_in_slab_polygon(wall, sf)
+        ]
+
+        for slab in candidates:
+            z_overlap = (
+                min(wall.z_max, slab.bbox.z_max)
+                - max(wall.z_min, slab.bbox.z_min)
+            )
+            if z_overlap <= tol:
+                continue
+
+            # Camera target: middle of the overlap zone
+            overlap_z = (
+                max(wall.z_min, slab.bbox.z_min)
+                + min(wall.z_max, slab.bbox.z_max)
+            ) / 2.0
+
+            violations.append(Violation(
+                global_id=wall.global_id,
+                element_name=wall.name,
+                rule="wall_clash_with_slab",
+                description=(
+                    f"Vägg krockar med bjälklag. Överlapp: "
+                    f"{z_overlap * unit_factor_to_mm:.1f} mm. "
+                    f"Matchad platta: {slab.bbox.global_id}."
+                ),
+                measured_gap_mm=z_overlap * unit_factor_to_mm,
+                related_global_ids=[slab.bbox.global_id],
+                camera_target=(cx, cy, overlap_z),
+            ))
+
+    return violations
