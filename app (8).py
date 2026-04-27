@@ -20,10 +20,14 @@ import streamlit as st
 from bcf_export import default_bcf_filename, violations_to_bcf
 from classification import filter_by_typeid_prefix
 from geometry import ElementBBox, SlabFootprint, bbox_of_element, slab_footprint_of_element
-from rules import check_walls_reach_slabs, filter_interior_walls
+from rules import (
+    check_walls_clash_slabs,
+    check_walls_reach_slabs,
+    filter_interior_walls,
+)
 
 
-WALL_PREFIXES = ["IWS", "IV"]
+WALL_PREFIXES = ["IWS", "IWC", "IV"]
 DEFAULT_MIN_SLAB_AREA_M2 = 3.0
 
 
@@ -92,14 +96,32 @@ def load_and_extract(
 
 st.set_page_config(page_title="IFC Geom Checker", layout="wide")
 st.title("IFC geometrisk kontroll — MVP")
-st.caption("Checker: vägg når UK/ÖK bjälklag - Arkitekt. filtrear fram innerväggar och ser om de följer modelleringsprinciper")
+st.caption("Geometriska kontroller mellan väggar och bjälklag")
 
 uploaded = st.file_uploader("Ladda upp IFC-fil", type=["ifc"])
 
-col_tol, col_maxgap, col_area = st.columns(3)
+st.subheader("Regler att köra")
+col_r1, col_r2 = st.columns(2)
+run_gap = col_r1.checkbox(
+    "Vägg når UK/ÖK bjälklag",
+    value=True,
+    help="Flaggar Z-gap mellan väggens topp och slab ovanför, samt botten och slab under.",
+)
+run_clash = col_r2.checkbox(
+    "Vägg krockar med bjälklag",
+    value=True,
+    help="Flaggar fall där vägg och slab fysiskt överlappar i 3D (vägg sticker upp i / genom slab).",
+)
+
+if not (run_gap or run_clash):
+    st.warning("Välj minst en regel att köra.")
+    st.stop()
+
+st.subheader("Inställningar")
+col_tol, col_maxgap, col_clash, col_area = st.columns(4)
 tol_mm = col_tol.number_input(
     "Tolerans Z (mm)", min_value=1.0, max_value=100.0, value=10.0, step=1.0,
-    help="Hur stort Z-gap som tillåts innan det flaggas som avvikelse.",
+    help="För gap-regeln: hur stort Z-gap som tillåts innan det flaggas.",
 )
 max_z_gap_mm = col_maxgap.number_input(
     "Max sökavstånd Z (mm)", min_value=50.0, max_value=2000.0, value=500.0, step=50.0,
@@ -107,6 +129,10 @@ max_z_gap_mm = col_maxgap.number_input(
         "Slabs längre bort i Z än så här ignoreras helt. "
         "Förhindrar matchning mot slab på fel våning."
     ),
+)
+clash_tol_mm = col_clash.number_input(
+    "Tolerans clash (mm)", min_value=1.0, max_value=100.0, value=20.0, step=1.0,
+    help="För clash-regeln: hur stor Z-överlapp som tillåts innan det flaggas.",
 )
 min_slab_area = col_area.number_input(
     "Min slab-area (m²)", min_value=0.5, max_value=50.0,
@@ -153,11 +179,18 @@ st.caption(
     f"Slabs: footprint ≥ {min_slab_area:.1f} m². Övriga skippas."
 )
 
-violations = check_walls_reach_slabs(
-    wall_bboxes, slab_footprints,
-    tolerance_mm=tol_mm,
-    max_z_gap_mm=max_z_gap_mm,
-)
+violations = []
+if run_gap:
+    violations.extend(check_walls_reach_slabs(
+        wall_bboxes, slab_footprints,
+        tolerance_mm=tol_mm,
+        max_z_gap_mm=max_z_gap_mm,
+    ))
+if run_clash:
+    violations.extend(check_walls_clash_slabs(
+        wall_bboxes, slab_footprints,
+        tolerance_mm=clash_tol_mm,
+    ))
 
 st.subheader("Resultat")
 if not violations:
