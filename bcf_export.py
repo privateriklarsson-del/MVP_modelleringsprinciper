@@ -30,17 +30,36 @@ def _group_by_slab(violations: list[Violation]) -> dict[str, list[Violation]]:
 
 def _topic_title(slab_guid: str, violations: list[Violation]) -> str:
     n = len(violations)
-    return f"{n} vägg{'ar' if n != 1 else ''} når inte bjälklag"
+    has_gap = any(v.rule.startswith("wall_top") or v.rule.startswith("wall_bottom")
+                  for v in violations)
+    has_clash = any(v.rule == "wall_clash_with_slab" for v in violations)
+
+    if has_gap and has_clash:
+        return f"{n} avvikelser mot bjälklag"
+    elif has_clash:
+        return f"{n} vägg{'ar' if n != 1 else ''} krockar med bjälklag"
+    else:
+        return f"{n} vägg{'ar' if n != 1 else ''} når inte bjälklag"
+
+
+_RULE_TO_PREFIX = {
+    "wall_top_reaches_slab_above": "gap-top",
+    "wall_bottom_reaches_slab_below": "gap-bot",
+    "wall_clash_with_slab": "clash",
+}
 
 
 def _topic_description(slab_guid: str, violations: list[Violation]) -> str:
     lines = [f"Bjälklag GlobalId: {slab_guid}", f"Antal väggar: {len(violations)}", ""]
-    # Sort: worst gap first
+    # Sort: worst measurement first
     sorted_v = sorted(violations, key=lambda v: abs(v.measured_gap_mm), reverse=True)
     for v in sorted_v:
-        rule_short = "top" if v.rule.endswith("above") else "bot"
+        prefix = _RULE_TO_PREFIX.get(v.rule, v.rule)
         name = v.element_name or v.global_id[:8]
-        lines.append(f"  [{rule_short}] {name} — gap {v.measured_gap_mm:+.1f} mm")
+        if v.rule == "wall_clash_with_slab":
+            lines.append(f"  [{prefix}] {name} — överlapp {v.measured_gap_mm:.1f} mm")
+        else:
+            lines.append(f"  [{prefix}] {name} — gap {v.measured_gap_mm:+.1f} mm")
     return "\n".join(lines)
 
 
